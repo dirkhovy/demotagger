@@ -123,7 +123,7 @@ def build_tagging_graph(words, model, builders):
     forward_sequence = [x.output() for x in f_init.add_inputs(word_embeddings)]
     backward_sequence = [x.output() for x in b_init.add_inputs(reversed(word_embeddings))]
 
-    return zip(forward_sequence, reversed(backward_sequence))
+    return list(zip(forward_sequence, reversed(backward_sequence)))
 
 
 def fit(words, tags, labels, model, builders):
@@ -144,14 +144,14 @@ def fit(words, tags, labels, model, builders):
         O = pycnn.parameter(pO)
 
     errs = []
-    for f, b, t in build_tagging_graph(words, model, builders):
-        f_b = pycnn.concatenate([f, b])
+    for (forward_state, backward_state), tag in zip(build_tagging_graph(words, model, builders), tags):
+        f_b = pycnn.concatenate([forward_state, backward_state])
         if MLP:
             # TODO: add bias terms
             r_t = O * (pycnn.tanh(H * f_b))
         else:
             r_t = O * f_b
-        err = pycnn.pickneglogsoftmax(r_t, t)
+        err = pycnn.pickneglogsoftmax(r_t, tag)
         errs.append(err)
 
     return pycnn.esum(errs)
@@ -172,11 +172,12 @@ def predict(sent, model, builders):
         O = pycnn.parameter(pO)
 
     tags = []
-    for f, b in build_tagging_graph(words, model, builders):
+    for forward_state, backward_state in build_tagging_graph(words, model, builders):
         if MLP:
-            r_t = O * (pycnn.tanh(H * pycnn.concatenate([f, b])))
+            r_t = O * (pycnn.tanh(H * pycnn.concatenate([forward_state, backward_state])))
         else:
-            r_t = O * pycnn.concatenate([f, b])
+            r_t = O * pycnn.concatenate([forward_state, backward_state])
+            
         out = pycnn.softmax(r_t)
         chosen = np.argmax(out.npvalue())
         tags.append(vt.i2w[chosen])
