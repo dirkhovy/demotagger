@@ -3,25 +3,65 @@ import random
 from collections import Counter
 import util
 import numpy as np
+import argparse
 
-# format of files: each line is "word<TAB>tag<newline>", blank line is new sentence.
-train_file = "/home/yogo/Vork/Research/corpora/pos/WSJ.TRAIN"
-test_file = "/home/yogo/Vork/Research/corpora/pos/WSJ.TEST"
+parser = argparse.ArgumentParser(
+    description="train a demographics predictor. File formats: CoNLL, plus one line with CSV demographic values")
+parser.add_argument('--train', help='train files')
+parser.add_argument('--test', help='test files')
+parser.add_argument('--target', help='predict age, gender, both of them, or the joint cross-product', choices=('age', 'gender', 'both', 'joint'), default='both')
+args = parser.parse_args()
+
+# read in data
+train_file = args.train
+test_file = args.test
 
 MLP = True
 
 
 def read(fname):
-    sent = []
+    """
+    read in a CoNLL style file
+    format of files: each line is
+    "word<TAB>tag<newline>", followed by
+    "age,gender",
+    blank line is new sentence.
+    :param fname: file to read
+    :return: generator of ([words, tags], [labels])
+    """
+    sentence = []
+    labels = []
     for line in open(fname):
         line = line.strip().split()
+
         if not line:
-            if sent:
-                yield sent
-            sent = []
+            if sentence:
+                yield (sentence, labels)
+            sentence = []
+            labels = []
+
         else:
-            word, pos_tag = line
-            sent.append((word, pos_tag))
+            elements = line.split('\t')
+
+            # read in age and gender info
+            if len(elements) == 1:
+                age, gender = line.split(',')
+                if args.target == 'age':
+                    labels = [age]
+                elif args.target == 'gender':
+                    labels = [gender]
+                elif args.target == 'both':
+                    labels = [age, gender]
+                elif args.target == 'joint':
+                    labels = ['%s-%s' % (age, gender)]
+
+            # read in words and tags
+            elif len(elements) == 2:
+                word, pos_tag = elements
+                sentence.append((word, pos_tag))
+
+            else:
+                print('Problem reading input file "%s": unexpected line "%s"' % (fname, line))
 
 
 train = list(read(train_file))
@@ -48,6 +88,7 @@ num_tags = vt.size()
 model = pycnn.Model()
 sgd = pycnn.SimpleSGDTrainer(model)
 
+# TODO: replace numbers with constants or arguments
 model.add_lookup_parameters("lookup", (num_words, 128))
 model.add_lookup_parameters("tl", (num_tags, 30))
 if MLP:
@@ -62,14 +103,14 @@ builders = [
 ]
 
 
-def build_tagging_graph(words, tags, model, builders):
+def build_tagging_graph(words, model, builders):
     """
     build the computational graph
     :param words: list of indices
     :param tags: list of indices
     :param model: current model to access parameters
     :param builders: builder to create state combinations
-    :return: joint error
+    :return: forward and backward sequence, plus tags and labels
     """
     pycnn.renew_cg()
     f_init, b_init = [b.initial_state() for b in builders]
@@ -82,6 +123,19 @@ def build_tagging_graph(words, tags, model, builders):
     forward_sequence = [x.output() for x in f_init.add_inputs(word_embeddings)]
     backward_sequence = [x.output() for x in b_init.add_inputs(reversed(word_embeddings))]
 
+    return zip(forward_sequence, reversed(backward_sequence))
+
+
+def fit(words, tags, labels, model, builders):
+    """
+    compute joint error of the
+    :param words:
+    :param tags:
+    :param labels:
+    :param model:
+    :param builders:
+    :return: joint error
+    """
     # retrieve model parameters
     if MLP:
         H = pycnn.parameter(pH)
@@ -89,9 +143,8 @@ def build_tagging_graph(words, tags, model, builders):
     else:
         O = pycnn.parameter(pO)
 
-    # compute per-token error
     errs = []
-    for f, b, t in zip(forward_sequence, reversed(backward_sequence), tags):
+    for f, b, t in build_tagging_graph(words, model, builders):
         f_b = pycnn.concatenate([f, b])
         if MLP:
             # TODO: add bias terms
@@ -104,22 +157,22 @@ def build_tagging_graph(words, tags, model, builders):
     return pycnn.esum(errs)
 
 
-def tag_sent(sent, model, builders):
-    # TODO: this code replicates most of the previous function, since it builds the same graph, only with a different loss/output node
-    pycnn.renew_cg()
-    f_init, b_init = [b.initial_state() for b in builders]
-    wembs = [pycnn.lookup(model["lookup"], vw.w2i.get(w, UNK)) for w, t in sent]
-
-    fw = [x.output() for x in f_init.add_inputs(wembs)]
-    bw = [x.output() for x in b_init.add_inputs(reversed(wembs))]
-
+def predict(sent, model, builders):
+    """
+    predict tags and demographic labels
+    :param sent:
+    :param model:
+    :param builders:
+    :return:
+    """
     if MLP:
         H = pycnn.parameter(pH)
         O = pycnn.parameter(pO)
     else:
         O = pycnn.parameter(pO)
+
     tags = []
-    for f, b, (w, t) in zip(fw, reversed(bw), sent):
+    for f, b in build_tagging_graph(words, model, builders):
         if MLP:
             r_t = O * (pycnn.tanh(H * pycnn.concatenate([f, b])))
         else:
@@ -143,7 +196,7 @@ for ITER in range(50):
         if i % 10000 == 0:
             good = bad = 0.0
             for sent in test:
-                tags = tag_sent(sent, model, builders)
+                tags = predict(sent, model, builders)
                 golds = [t for w, t in sent]
                 for go, gu in zip(golds, tags):
                     if go == gu:
@@ -153,7 +206,7 @@ for ITER in range(50):
             print(good / (good + bad))
         ws = [vw.w2i.get(w, UNK) for w, p in s]
         ps = [vt.w2i[p] for w, p in s]
-        sum_errs = build_tagging_graph(ws, ps, model, builders)
+        sum_errs = fit(ws, ps, model, builders)
 
         total_loss += sum_errs.scalar_value()
         tagged += len(ps)
