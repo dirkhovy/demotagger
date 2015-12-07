@@ -78,12 +78,12 @@ for sentence in train:
 wc.update(words)
 words.append("_UNK_")
 
-vw = util.Vocab.from_corpus([words])
-vt = util.Vocab.from_corpus([tags])
-UNK = vw.w2i["_UNK_"]
+vocab_words = util.Vocab.from_corpus([words])
+vocab_tags = util.Vocab.from_corpus([tags])
+UNK = vocab_words.w2i["_UNK_"]
 
-num_words = vw.size()
-num_tags = vt.size()
+num_words = vocab_words.size()
+num_tags = vocab_tags.size()
 
 model = pycnn.Model()
 sgd = pycnn.SimpleSGDTrainer(model)
@@ -107,10 +107,9 @@ def build_tagging_graph(words, model, builders):
     """
     build the computational graph
     :param words: list of indices
-    :param tags: list of indices
     :param model: current model to access parameters
     :param builders: builder to create state combinations
-    :return: forward and backward sequence, plus tags and labels
+    :return: forward and backward sequence
     """
     pycnn.renew_cg()
     f_init, b_init = [b.initial_state() for b in builders]
@@ -129,11 +128,11 @@ def build_tagging_graph(words, model, builders):
 def fit(words, tags, labels, model, builders):
     """
     compute joint error of the
-    :param words:
-    :param tags:
-    :param labels:
-    :param model:
-    :param builders:
+    :param words: list of indices
+    :param tags: list of indices
+    :param labels: index
+    :param model: current model to access parameters
+    :param builders: builder to create state combinations
     :return: joint error
     """
     # retrieve model parameters
@@ -163,7 +162,7 @@ def predict(sent, model, builders):
     :param sent:
     :param model:
     :param builders:
-    :return:
+    :return: tag and label predictions
     """
     if MLP:
         H = pycnn.parameter(pH)
@@ -177,10 +176,10 @@ def predict(sent, model, builders):
             r_t = O * (pycnn.tanh(H * pycnn.concatenate([forward_state, backward_state])))
         else:
             r_t = O * pycnn.concatenate([forward_state, backward_state])
-            
+
         out = pycnn.softmax(r_t)
         chosen = np.argmax(out.npvalue())
-        tags.append(vt.i2w[chosen])
+        tags.append(vocab_tags.i2w[chosen])
 
     return tags
 
@@ -205,8 +204,8 @@ for ITER in range(50):
                     else:
                         bad += 1
             print(good / (good + bad))
-        ws = [vw.w2i.get(w, UNK) for w, p in s]
-        ps = [vt.w2i[p] for w, p in s]
+        ws = [vocab_words.w2i.get(w, UNK) for w, p in s]
+        ps = [vocab_tags.w2i[p] for w, p in s]
         sum_errs = fit(ws, ps, model, builders)
 
         total_loss += sum_errs.scalar_value()
