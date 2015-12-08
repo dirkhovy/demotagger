@@ -121,7 +121,9 @@ MLP_HIDDEN_LAYER_SIZE = args.n_output
 
 model.add_lookup_parameters("word_lookup", (num_words, WORD_EMBEDDING_SIZE))
 pH = model.add_parameters("HID", (MLP_HIDDEN_LAYER_SIZE, LSTM_HIDDEN_LAYER_SIZE))
+biasH = model.add_parameters("BIAS_HIDDEN", (MLP_HIDDEN_LAYER_SIZE))
 pO = model.add_parameters("OUT", (num_labels, MLP_HIDDEN_LAYER_SIZE))
+biasO = model.add_parameters("BIAS_OUT", (num_labels))
 print("declared variables", file=sys.stderr)
 
 builder = pycnn.LSTMBuilder(1, WORD_EMBEDDING_SIZE, LSTM_HIDDEN_LAYER_SIZE, model)
@@ -169,11 +171,13 @@ def fit(word_indices, label, model, builder):
     # print("final state", final_state, file=sys.stderr)
     H = pycnn.parameter(pH)
     O = pycnn.parameter(pO)
+    bias_O = pycnn.parameter(biasO)
+    bias_H = pycnn.parameter(biasH)
 
     # print(pycnn.cg().PrintGraphviz())
 
     # TODO: add bias terms
-    r_t = O * (pycnn.tanh(H * final_state))
+    r_t = bias_O + (O * (bias_H + pycnn.tanh(H * final_state)))
 
     return pycnn.pickneglogsoftmax(r_t, label)
 
@@ -190,11 +194,13 @@ def predict(word_indices, model, builder):
 
     H = pycnn.parameter(pH)
     O = pycnn.parameter(pO)
+    bias_O = pycnn.parameter(biasO)
+    bias_H = pycnn.parameter(biasH)
 
-    f_b = forward_states[-1]
+    final_state = forward_states[-1]
 
     # TODO: add bias terms
-    r_t = O * (pycnn.tanh(H * f_b))
+    r_t = bias_O + (O * (bias_H + pycnn.tanh(H * final_state)))
 
     out = pycnn.softmax(r_t)
     chosen = np.argmax(out.npvalue())
