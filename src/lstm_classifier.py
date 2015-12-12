@@ -1,14 +1,16 @@
 import argparse
 import pycnn
 import random
+import sys
 
 import numpy as np
-import sys
 
 parser = argparse.ArgumentParser(
     description="train a demographics predictor. File formats: CoNLL, plus one line with CSV demographic values")
-parser.add_argument('--train', help='train files')
-parser.add_argument('--test', help='test files')
+parser.add_argument('--train', help='train files', required=True)
+parser.add_argument('--dev', help='dev files', required=True)
+parser.add_argument('--test', help='test files', required=True)
+parser.add_argument('--embeddings', help='embeddings files (word2vec format)', default=None)
 parser.add_argument('--target', help='predict age, gender, both of them, or the joint cross-product',
                     choices=('age', 'gender', 'both', 'joint'), default='both')
 parser.add_argument('--iterations', help='number of iterations', default=50)
@@ -23,6 +25,25 @@ args = parser.parse_args()
 # read in data
 train_file = args.train
 test_file = args.test
+dev_file = args.dev
+
+
+def read_embeddings_file(file_name):
+    """
+    read in a file with space separated embeddings of the format
+    <WORD Value1 Value2 ... ValueN>
+    :param file_name: embeddings file
+    :return: dictionary {word: [float(values)]}
+    """
+    words = []
+    embeddings = []
+    for line in open(file_name):
+        elements = line.strip().split(' ')
+        if len(elements) > 2:
+            words.append(elements[0])
+            embeddings.append(list(map(float, elements[1:])))
+
+    return words, embeddings
 
 
 def read(fname):
@@ -73,6 +94,7 @@ def read(fname):
 
 train = list(read(train_file))
 test = list(read(test_file))
+dev = list(read(dev_file))
 
 words = set()
 labels = set()
@@ -80,9 +102,24 @@ labels = set()
 for sentence, label in train:
     words.update(sentence)
     labels.add(label)
-words.add("_UNK_")
-words.add("_EOS_")
 
+# id we have pre-trained embeddings, read them in (preserving order), and add the special tokens
+if args.embeddings:
+    print('reading embeddings file', file=sys.stderr)
+    words, pre_trained_embeddings = read_embeddings_file(args.embeddings)
+    embedding_dimensionality = len(pre_trained_embeddings[0])
+    words.append("_UNK_")
+    pre_trained_embeddings.append([0.0] * embedding_dimensionality)
+
+    words.append("_EOS_")
+    pre_trained_embeddings.append([1.0] * embedding_dimensionality)
+
+# otherwise, just add the special tokens (order does not matter)
+else:
+    words.add("_UNK_")
+    words.add("_EOS_")
+
+# get the hashing/bookkeeping objects
 i2w = list(words)
 w2i = {word: i for i, word in enumerate(i2w)}
 i2l = list(labels)
@@ -91,23 +128,36 @@ UNK = w2i["_UNK_"]
 EOS = w2i["_EOS_"]
 
 # convert words to word_indices
+oov_train = 0
+oov_test = 0
+oov_dev = 0
 for i, (sentence, label) in enumerate(train):
     word_indices = [w2i.get(word, UNK) for word in sentence]
     word_indices.append(EOS)
     label_index = l2i[label]
     train[i] = (word_indices, label_index)
+    oov_train += word_indices.count(UNK)
 
 for i, (sentence, label) in enumerate(test):
     word_indices = [w2i.get(word, UNK) for word in sentence]
     word_indices.append(EOS)
     label_index = l2i[label]
     test[i] = (word_indices, label_index)
+    oov_test += word_indices.count(UNK)
+
+for i, (sentence, label) in enumerate(dev):
+    word_indices = [w2i.get(word, UNK) for word in sentence]
+    word_indices.append(EOS)
+    label_index = l2i[label]
+    dev[i] = (word_indices, label_index)
+    oov_dev += word_indices.count(UNK)
 
 num_words = len(w2i)
 num_labels = len(l2i)
 
-print("read in all the files!", file=sys.stderr)
-print("%s train instances, %s test instances" % (len(train), len(test)), file=sys.stderr)
+print("read in all the files!\n", '*' * 20, file=sys.stderr)
+print("%s train instances (%s OOV words), %s test instances (%s OOV words), %s dev instances (%s OOV words)" % (
+len(train), oov_train, len(test), oov_test, len(dev), oov_dev), file=sys.stderr)
 print("%s words, %s labels\n" % (num_words, num_labels), file=sys.stderr)
 
 model = pycnn.Model()
@@ -119,7 +169,10 @@ WORD_EMBEDDING_SIZE = args.n_embeddings
 LSTM_HIDDEN_LAYER_SIZE = args.n_hidden
 MLP_HIDDEN_LAYER_SIZE = args.n_output
 
-model.add_lookup_parameters("word_lookup", (num_words, WORD_EMBEDDING_SIZE))
+word_embeddings = model.add_lookup_parameters("word_lookup", (num_words, WORD_EMBEDDING_SIZE))
+if args.embeddings:
+    word_embeddings.init_from_array(np.array(pre_trained_embeddings))
+
 pH = model.add_parameters("HID", (MLP_HIDDEN_LAYER_SIZE, LSTM_HIDDEN_LAYER_SIZE))
 biasH = model.add_parameters("BIAS_HIDDEN", (MLP_HIDDEN_LAYER_SIZE))
 pO = model.add_parameters("OUT", (num_labels, MLP_HIDDEN_LAYER_SIZE))
@@ -129,7 +182,6 @@ print("declared variables", file=sys.stderr)
 builder = pycnn.LSTMBuilder(1, WORD_EMBEDDING_SIZE, LSTM_HIDDEN_LAYER_SIZE, model)
 # builder = pycnn.SimpleRNNBuilder(1, WORD_EMBEDDING_SIZE, LSTM_HIDDEN_LAYER_SIZE, model)
 print("declared builder", file=sys.stderr)
-
 
 
 def build_tagging_graph(word_indices, model, builder):
@@ -238,14 +290,14 @@ for iteration in range(args.iterations):
 
     for i, (sentence, label) in enumerate(train, 1):
         if num_instances % args.status == 0:
-            print('\nITERATION %s, instance %s/%s' % (iteration+1, i, len(train)), file=sys.stderr)
+            print('\nITERATION %s, instance %s/%s' % (iteration + 1, i, len(train)), file=sys.stderr)
             sgd.status()
             print('Avg. loss', sum(losses) / len(losses), file=sys.stderr)
             losses.clear()
 
         if num_instances % (args.status * 5) == 0:
-            print('-'*50, file=sys.stderr)
-            print("Accuracy on test: %s\n" % (evaluate(test, model, builder)), file=sys.stderr)
+            print('-' * 50, file=sys.stderr)
+            print("Accuracy on dev: %s\n" % (evaluate(dev, model, builder)), file=sys.stderr)
 
         # TRAINING
         # fit the shit!
@@ -256,9 +308,10 @@ for iteration in range(args.iterations):
         error.backward()
         sgd.update()
 
-    print('='*50, file=sys.stderr)
+    print('=' * 50, file=sys.stderr)
+    print("Accuracy on dev: %s" % (evaluate(dev, model, builder)), file=sys.stderr)
     print("Accuracy on test: %s" % (evaluate(test, model, builder)), file=sys.stderr)
     print('Avg. loss', sum(losses) / len(losses), file=sys.stderr)
-    print('='*50, file=sys.stderr)
+    print('=' * 50, file=sys.stderr)
     num_instances = 1
     losses.clear()
