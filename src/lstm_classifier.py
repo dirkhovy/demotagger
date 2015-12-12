@@ -20,6 +20,7 @@ parser.add_argument('--n_embeddings', help='dimensionality of word embeddings', 
 parser.add_argument('--n_hidden', help='dimensionality of hidden LSTM layer', default=50, type=int)
 parser.add_argument('--n_output', help='dimensionality of output layer', default=32, type=int)
 parser.add_argument('--dropout', help='dropout probability for final sentence representation', default=0.0, type=float)
+parser.add_argument('--batch', help='batch size', default=1, type=int)
 args = parser.parse_args()
 
 # read in data
@@ -287,8 +288,10 @@ losses = []
 
 for iteration in range(args.iterations):
     random.shuffle(train)
+    batch_i = 0
 
     for i, (sentence, label) in enumerate(train, 1):
+
         if num_instances % args.status == 0:
             print('\nITERATION %s, instance %s/%s' % (iteration + 1, i, len(train)), file=sys.stderr)
             sgd.status()
@@ -304,14 +307,19 @@ for iteration in range(args.iterations):
         error = fit(sentence, label, model, builder)
 
         losses.append(error.scalar_value())
-        num_instances += 1
         error.backward()
-        sgd.update()
+
+        num_instances += 1
+        batch_i += 1
+
+        if batch_i == args.batch:
+            batch_i = 0
+            sgd.update()
 
     print('=' * 50, file=sys.stderr)
-    print("Accuracy on dev: %s" % (evaluate(dev, model, builder)), file=sys.stderr)
-    print("Accuracy on test: %s" % (evaluate(test, model, builder)), file=sys.stderr)
-    print('Avg. loss', sum(losses) / len(losses), file=sys.stderr)
+    print("iteration %s. Accuracy on dev: %s" % (iteration, evaluate(dev, model, builder)))
+    print("iteration %s. Accuracy on test: %s" % (iteration, evaluate(test, model, builder)))
+    print('iteration %s. Avg. loss %s' %(iteration, sum(losses) / len(losses)))
     print('=' * 50, file=sys.stderr)
     num_instances = 1
     losses.clear()
