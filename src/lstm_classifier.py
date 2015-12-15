@@ -293,8 +293,8 @@ for iteration in range(args.iterations):
     for i, (sentence, label) in enumerate(train, 1):
 
         if num_instances % args.status == 0:
-            print('\nITERATION %s, instance %s/%s' % (iteration + 1, i, len(train)), file=sys.stderr)
-            sgd.status()
+            print('\nITERATION %s, instance %s/%s' % (iteration + 1, i, len(train)), file=sys.stderr, end='\t')
+            # sgd.status()
             print('Avg. loss', sum(losses) / len(losses), file=sys.stderr)
             losses.clear()
 
@@ -317,8 +317,8 @@ for iteration in range(args.iterations):
             sgd.update()
 
     print('=' * 50, file=sys.stderr)
-    print("iteration %s. Accuracy on dev: %s" % (iteration, evaluate(dev, model, builder)))
-    print("iteration %s. Accuracy on test: %s" % (iteration, evaluate(test, model, builder)))
+    print("iteration %s. Accuracy on dev: %s" % (iteration + 1, evaluate(dev, model, builder)))
+    print("iteration %s. Accuracy on test: %s" % (iteration + 1, evaluate(test, model, builder)))
     print('iteration %s. Avg. loss %s' %(iteration, sum(losses) / len(losses)))
     print('=' * 50, file=sys.stderr)
     num_instances = 1
