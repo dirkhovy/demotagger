@@ -6,6 +6,7 @@ parser = argparse.ArgumentParser(
     description="filter out all instances that are contained in the gold data provided from the TP corpus and output in the same format as the gold data")
 parser.add_argument('input_file', help='input corpus files')
 parser.add_argument('--gold', help='gold files', required=True, nargs='+')
+parser.add_argument('--gold_format', help='format of gold files', choices=('conll', 'corpus'), default='conll')
 parser.add_argument('--binarize', help='use only U35/O45 for age', action='store_true')
 
 args = parser.parse_args()
@@ -52,9 +53,21 @@ def read_conll_file(file_name):
     if current_tags != []:
         yield (current_class, current_words, current_tags)
 
+
+def read_corpus_file(file_name):
+    for line in open(file_name):
+        line = line.strip()
+        elements = line.split('\t')
+        yield elements[-1]
+
+
 for file_name in args.gold:
-    for (labels, words, tags) in read_conll_file(file_name):
-        gold.add(' '.join(words))
+    if args.gold_format == 'conll':
+        for (labels, words, tags) in read_conll_file(file_name):
+            gold.add(' '.join(words))
+    elif args.gold_format == 'corpus':
+        for words in read_corpus_file(file_name):
+            gold.add(words)
 
 removed = 0
 for line in open(args.input_file):
