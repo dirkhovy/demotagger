@@ -2,8 +2,9 @@ import argparse
 import pycnn
 import random
 import sys
-
 import numpy as np
+import time
+from numba import jit
 
 parser = argparse.ArgumentParser(
     description="train a demographics predictor. File formats: CoNLL, plus one line with CSV demographic values")
@@ -13,6 +14,8 @@ parser.add_argument('--test', help='test files', required=True)
 parser.add_argument('--embeddings', help='embeddings files (word2vec format)', default=None)
 parser.add_argument('--target', help='predict age, gender, both of them, or the joint cross-product',
                     choices=('age', 'gender', 'both', 'joint'), default='both')
+parser.add_argument('--trainer', help='which training algorithm to use',
+                    choices=('adagrad', 'sgd', 'adam', 'adadelta', 'momentum'), default='adam')
 parser.add_argument('--iterations', help='number of iterations', default=50)
 parser.add_argument('--status', help='number of processed instances between status updates', default=10000, type=int)
 parser.add_argument('--noise', help='amount of noise added to embeddings', default=0.1, type=float)
@@ -79,8 +82,8 @@ def read(fname):
                     labels = age
                 elif args.target == 'gender':
                     labels = gender
-                # elif args.target == 'both':
-                #     labels = [age, gender]
+                elif args.target == 'both':
+                    labels = [age, gender]
                 elif args.target == 'joint':
                     labels = '%s-%s' % (age, gender)
 
@@ -102,7 +105,11 @@ labels = set()
 
 for sentence, label in train:
     words.update(sentence)
-    labels.add(label)
+    if args.target == 'both':
+        for individual_label in label:
+            labels.add(individual_label)
+    else:
+        labels.add(label)
 
 # id we have pre-trained embeddings, read them in (preserving order), and add the special tokens
 if args.embeddings:
@@ -134,24 +141,27 @@ oov_test = 0
 oov_dev = 0
 for i, (sentence, label) in enumerate(train):
     word_indices = [w2i.get(word, UNK) for word in sentence]
+    oov_train += word_indices.count(UNK)
     word_indices.append(EOS)
+    # word_indices = np.array(word_indices)
     label_index = l2i[label]
     train[i] = (word_indices, label_index)
-    oov_train += word_indices.count(UNK)
 
 for i, (sentence, label) in enumerate(test):
     word_indices = [w2i.get(word, UNK) for word in sentence]
+    oov_test += word_indices.count(UNK)
     word_indices.append(EOS)
+    # word_indices = np.array(word_indices)
     label_index = l2i[label]
     test[i] = (word_indices, label_index)
-    oov_test += word_indices.count(UNK)
 
 for i, (sentence, label) in enumerate(dev):
     word_indices = [w2i.get(word, UNK) for word in sentence]
+    oov_dev += word_indices.count(UNK)
     word_indices.append(EOS)
+    # word_indices = np.array(word_indices)
     label_index = l2i[label]
     dev[i] = (word_indices, label_index)
-    oov_dev += word_indices.count(UNK)
 
 num_words = len(w2i)
 num_labels = len(l2i)
@@ -162,9 +172,10 @@ len(train), oov_train, len(test), oov_test, len(dev), oov_dev), file=sys.stderr)
 print("%s words, %s labels\n" % (num_words, num_labels), file=sys.stderr)
 
 model = pycnn.Model()
-sgd = pycnn.SimpleSGDTrainer(model)
+trainers = {'sgd': pycnn.SimpleSGDTrainer, 'adam': pycnn.AdamTrainer, 'adagrad': pycnn.AdagradTrainer, 'adadelta': pycnn.AdadeltaTrainer, 'momentum': pycnn.MomentumSGDTrainer}
+sgd = trainers[args.trainer](model)
 
-print("declared model and trainer", file=sys.stderr)
+print("declared model and trainer (%s)" % (args.trainer), file=sys.stderr)
 
 WORD_EMBEDDING_SIZE = args.n_embeddings
 LSTM_HIDDEN_LAYER_SIZE = args.n_hidden
@@ -178,12 +189,18 @@ pH = model.add_parameters("HID", (MLP_HIDDEN_LAYER_SIZE, LSTM_HIDDEN_LAYER_SIZE)
 biasH = model.add_parameters("BIAS_HIDDEN", (MLP_HIDDEN_LAYER_SIZE))
 pO = model.add_parameters("OUT", (num_labels, MLP_HIDDEN_LAYER_SIZE))
 biasO = model.add_parameters("BIAS_OUT", (num_labels))
+
+if args.target == 'both':
+    pH2 = model.add_parameters("HID2", (MLP_HIDDEN_LAYER_SIZE, LSTM_HIDDEN_LAYER_SIZE))
+    biasH2 = model.add_parameters("BIAS_HIDDEN2", (MLP_HIDDEN_LAYER_SIZE))
+    pO2 = model.add_parameters("OUT2", (num_labels, MLP_HIDDEN_LAYER_SIZE))
+    biasO2 = model.add_parameters("BIAS_OUT2", (num_labels))
+
 print("declared variables", file=sys.stderr)
 
 builder = pycnn.LSTMBuilder(1, WORD_EMBEDDING_SIZE, LSTM_HIDDEN_LAYER_SIZE, model)
 # builder = pycnn.SimpleRNNBuilder(1, WORD_EMBEDDING_SIZE, LSTM_HIDDEN_LAYER_SIZE, model)
 print("declared builder", file=sys.stderr)
-
 
 def build_tagging_graph(word_indices, model, builder):
     """
@@ -205,7 +222,7 @@ def build_tagging_graph(word_indices, model, builder):
 
     return forward_sequence
 
-
+@jit
 def fit(word_indices, label, model, builder):
     """
     compute joint error of the
@@ -285,6 +302,7 @@ def evaluate(data_set, model, builder):
 
 num_instances = 1
 losses = []
+start = time.time()
 
 for iteration in range(args.iterations):
     random.shuffle(train)
@@ -293,9 +311,11 @@ for iteration in range(args.iterations):
     for i, (sentence, label) in enumerate(train, 1):
 
         if num_instances % args.status == 0:
-            print('\nITERATION %s, instance %s/%s' % (iteration + 1, i, len(train)), file=sys.stderr, end='\t')
+            print('ITERATION %s, instance %s/%s' % (iteration + 1, i, len(train)), file=sys.stderr, end='\t')
             # sgd.status()
-            print('Avg. loss', sum(losses) / len(losses), file=sys.stderr)
+            print('Avg. loss', sum(losses) / len(losses), file=sys.stderr, end='\t')
+            print('time: %.2f sec' % (time.time() - start), file=sys.stderr)
+            start = time.time()
             losses.clear()
 
         if num_instances % (args.status * 5) == 0:
@@ -319,7 +339,8 @@ for iteration in range(args.iterations):
     print('=' * 50, file=sys.stderr)
     print("iteration %s. Accuracy on dev: %s" % (iteration + 1, evaluate(dev, model, builder)))
     print("iteration %s. Accuracy on test: %s" % (iteration + 1, evaluate(test, model, builder)))
-    print('iteration %s. Avg. loss %s' %(iteration, sum(losses) / len(losses)))
+    print('iteration %s. Avg. loss %s' %(iteration + 1, sum(losses) / len(losses)))
     print('=' * 50, file=sys.stderr)
     num_instances = 1
+    start = time.time()
     losses.clear()
