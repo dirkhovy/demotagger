@@ -2,8 +2,9 @@ import argparse
 import pycnn
 import random
 import sys
-import numpy as np
 import time
+
+import numpy as np
 from numba import jit
 
 parser = argparse.ArgumentParser(
@@ -50,7 +51,7 @@ def read_embeddings_file(file_name):
     return words, embeddings
 
 
-def read(fname):
+def read(fname, target):
     """
     read in a CoNLL style file
     format of files: each line is
@@ -62,15 +63,17 @@ def read(fname):
     """
     sentence = []
     labels = None
+    include = True
 
     for line in open(fname):
         line = line.strip()
 
         if not line:
-            if sentence:
+            if sentence != [] and include:
                 yield (sentence, labels)
             sentence = []
             labels = None
+            include = True
 
         else:
             elements = line.split('\t')
@@ -78,14 +81,21 @@ def read(fname):
             # read in age and gender info
             if len(elements) == 1:
                 age, gender = line.split(',')
-                if args.target == 'age':
+
+                if target == 'age':
+                    if age == 'NONE':
+                        include = False
                     labels = age
-                elif args.target == 'gender':
+                elif target == 'gender':
+                    if gender == 'NONE':
+                        include = False
                     labels = gender
-                elif args.target == 'both':
-                    labels = [age, gender]
-                elif args.target == 'joint':
+                elif target == 'joint':
                     labels = '%s-%s' % (age, gender)
+                    if age == 'NONE' or gender == 'NONE':
+                        include = False
+                elif target == 'both':
+                    labels = [age if age != 'NONE' else None, gender if gender != 'NONE' else None]
 
             # read in words and tags
             elif len(elements) == 2:
@@ -96,20 +106,38 @@ def read(fname):
                 print('Problem reading input file "%s": unexpected line "%s"' % (fname, line))
 
 
-train = list(read(train_file))
-test = list(read(test_file))
-dev = list(read(dev_file))
+train = list(read(train_file, args.target))
+test = list(read(test_file, args.target))
+dev = list(read(dev_file, args.target))
 
 words = set()
 labels = set()
+age_labels = set()
+gender_labels = set()
 
 for sentence, label in train:
     words.update(sentence)
     if args.target == 'both':
-        for individual_label in label:
-            labels.add(individual_label)
+        for i, individual_label in enumerate(label):
+            if label is not None:
+                labels.add(individual_label)
+                if i == 0:
+                    age_labels.add(individual_label)
+                else:
+                    gender_labels.add(individual_label)
+
     else:
         labels.add(label)
+        if args.target == 'age':
+            age_labels.add(label)
+        elif args.target == 'gender':
+            gender_labels.add(label)
+
+try:
+    age_labels.remove(None)
+    gender_labels.remove(None)
+except KeyError:
+    print('No unspecified labels in target', file=sys.stderr)
 
 # id we have pre-trained embeddings, read them in (preserving order), and add the special tokens
 if args.embeddings:
@@ -132,47 +160,59 @@ i2w = list(words)
 w2i = {word: i for i, word in enumerate(i2w)}
 i2l = list(labels)
 l2i = {label: i for i, label in enumerate(i2l)}
+i2al = list(age_labels)
+al2i = {label: i for i, label in enumerate(i2al)}
+i2gl = list(gender_labels)
+gl2i = {label: i for i, label in enumerate(i2gl)}
+
 UNK = w2i["_UNK_"]
 EOS = w2i["_EOS_"]
 
+
+def convert_instances(data_set):
+    oov = 0
+    for i, (sentence, label) in enumerate(data_set):
+        word_indices = [w2i.get(word, UNK) for word in sentence]
+        oov += word_indices.count(UNK)
+        word_indices.append(EOS)
+        # word_indices = np.array(word_indices)
+        if args.target == 'both':
+            label_index = [al2i[label[0]] if label[0] is not None else None,
+                           gl2i[label[1]] if label[1] is not None else None]
+        else:
+            label_index = l2i[label]
+        data_set[i] = (word_indices, label_index)
+    return data_set, oov
+
+
 # convert words to word_indices
-oov_train = 0
-oov_test = 0
-oov_dev = 0
-for i, (sentence, label) in enumerate(train):
-    word_indices = [w2i.get(word, UNK) for word in sentence]
-    oov_train += word_indices.count(UNK)
-    word_indices.append(EOS)
-    # word_indices = np.array(word_indices)
-    label_index = l2i[label]
-    train[i] = (word_indices, label_index)
+train, oov_train = convert_instances(train)
+test, oov_test = convert_instances(test)
+dev, oov_dev = convert_instances(dev)
 
-for i, (sentence, label) in enumerate(test):
-    word_indices = [w2i.get(word, UNK) for word in sentence]
-    oov_test += word_indices.count(UNK)
-    word_indices.append(EOS)
-    # word_indices = np.array(word_indices)
-    label_index = l2i[label]
-    test[i] = (word_indices, label_index)
-
-for i, (sentence, label) in enumerate(dev):
-    word_indices = [w2i.get(word, UNK) for word in sentence]
-    oov_dev += word_indices.count(UNK)
-    word_indices.append(EOS)
-    # word_indices = np.array(word_indices)
-    label_index = l2i[label]
-    dev[i] = (word_indices, label_index)
+# for both, split data into labels, add target type to each instance
+if args.target == 'both':
+    train_age = [((words, labels[0]), 'age') for words, labels in train if labels[0] is not None]
+    train_gender = [((words, labels[1]), 'gender') for words, labels in train if labels[1] is not None]
+    smaller_training_size = min(len(train_age), len(train_gender))
+    print("age/gender-split: %s to %s " % (len(train_age), len(train_gender)), smaller_training_size)
+# otherwise, just add target type to each instance
+else:
+    train = [(y, args.target) for y in train]
 
 num_words = len(w2i)
 num_labels = len(l2i)
 
 print("read in all the files!\n", '*' * 20, file=sys.stderr)
 print("%s train instances (%s OOV words), %s test instances (%s OOV words), %s dev instances (%s OOV words)" % (
-len(train), oov_train, len(test), oov_test, len(dev), oov_dev), file=sys.stderr)
-print("%s words, %s labels\n" % (num_words, num_labels), file=sys.stderr)
+    len(train), oov_train, len(test), oov_test, len(dev), oov_dev), file=sys.stderr)
+print("%s words, %s labels (%s)" % (num_words, num_labels, i2l), file=sys.stderr)
+if args.target == 'both':
+    print("\tage labels: %s, gender labels: %s" % (i2al, i2gl), file=sys.stderr)
 
 model = pycnn.Model()
-trainers = {'sgd': pycnn.SimpleSGDTrainer, 'adam': pycnn.AdamTrainer, 'adagrad': pycnn.AdagradTrainer, 'adadelta': pycnn.AdadeltaTrainer, 'momentum': pycnn.MomentumSGDTrainer}
+trainers = {'sgd': pycnn.SimpleSGDTrainer, 'adam': pycnn.AdamTrainer, 'adagrad': pycnn.AdagradTrainer,
+            'adadelta': pycnn.AdadeltaTrainer, 'momentum': pycnn.MomentumSGDTrainer}
 sgd = trainers[args.trainer](model)
 
 print("declared model and trainer (%s)" % (args.trainer), file=sys.stderr)
@@ -187,20 +227,28 @@ if args.embeddings:
 
 pH = model.add_parameters("HID", (MLP_HIDDEN_LAYER_SIZE, LSTM_HIDDEN_LAYER_SIZE))
 biasH = model.add_parameters("BIAS_HIDDEN", (MLP_HIDDEN_LAYER_SIZE))
-pO = model.add_parameters("OUT", (num_labels, MLP_HIDDEN_LAYER_SIZE))
-biasO = model.add_parameters("BIAS_OUT", (num_labels))
 
-if args.target == 'both':
-    pH2 = model.add_parameters("HID2", (MLP_HIDDEN_LAYER_SIZE, LSTM_HIDDEN_LAYER_SIZE))
-    biasH2 = model.add_parameters("BIAS_HIDDEN2", (MLP_HIDDEN_LAYER_SIZE))
-    pO2 = model.add_parameters("OUT2", (num_labels, MLP_HIDDEN_LAYER_SIZE))
-    biasO2 = model.add_parameters("BIAS_OUT2", (num_labels))
+if args.target in ['joint']:
+    pOutAge = model.add_parameters("OUT_AGE", (num_labels, MLP_HIDDEN_LAYER_SIZE / 2))
+    biasOutAge = model.add_parameters("BIAS_OUT_AGE", (num_labels))
+elif args.target in ['age', 'both']:
+    pOutAge = model.add_parameters("OUT_AGE", (len(age_labels), MLP_HIDDEN_LAYER_SIZE / 2))
+    biasOutAge = model.add_parameters("BIAS_OUT_AGE", (len(age_labels)))
+
+if args.target in ['gender', 'both']:
+    pOutGender = model.add_parameters("OUT2", (len(gender_labels), MLP_HIDDEN_LAYER_SIZE / 2))
+    biasOutGender = model.add_parameters("BIAS_OUT2", (len(gender_labels)))
+
+# TODO: do we need a second hidden layer, or do we want to pool information there?
+pH2 = model.add_parameters("HID2", (MLP_HIDDEN_LAYER_SIZE / 2, MLP_HIDDEN_LAYER_SIZE))
+biasH2 = model.add_parameters("BIAS_HIDDEN2", (MLP_HIDDEN_LAYER_SIZE / 2))
 
 print("declared variables", file=sys.stderr)
 
 builder = pycnn.LSTMBuilder(1, WORD_EMBEDDING_SIZE, LSTM_HIDDEN_LAYER_SIZE, model)
 # builder = pycnn.SimpleRNNBuilder(1, WORD_EMBEDDING_SIZE, LSTM_HIDDEN_LAYER_SIZE, model)
 print("declared builder", file=sys.stderr)
+
 
 def build_tagging_graph(word_indices, model, builder):
     """
@@ -222,8 +270,9 @@ def build_tagging_graph(word_indices, model, builder):
 
     return forward_sequence
 
+
 @jit
-def fit(word_indices, label, model, builder):
+def fit(word_indices, label, model, builder, target):
     """
     compute joint error of the
     :param word_indices: list of indices
@@ -240,19 +289,29 @@ def fit(word_indices, label, model, builder):
     final_state = pycnn.dropout(final_state, 0.1)
     # print("final state", final_state, file=sys.stderr)
     H = pycnn.parameter(pH)
-    O = pycnn.parameter(pO)
-    bias_O = pycnn.parameter(biasO)
     bias_H = pycnn.parameter(biasH)
+    H2 = pycnn.parameter(pH2)
+    bias_H2 = pycnn.parameter(biasH2)
+
+    if target in ['age', 'joint']:
+        O = pycnn.parameter(pOutAge)
+        bias_O = pycnn.parameter(biasOutAge)
+    elif target == 'gender':
+        O = pycnn.parameter(pOutGender)
+        bias_O = pycnn.parameter(biasOutGender)
 
     # print(pycnn.cg().PrintGraphviz())
+    # if target == 'both':
+    #     hidden = bias_H + pycnn.tanh(H * final_state)
+    #     r_age = bias_O + (O * hidden)
+    #     r_gender = bias_O2 + (O2 * hidden)
+    #     return pycnn.esum([pycnn.pickneglogsoftmax(r_age, label[0]), pycnn.pickneglogsoftmax(r_gender, label[1])])
 
-    # TODO: add bias terms
-    r_t = bias_O + (O * (bias_H + pycnn.tanh(H * final_state)))
-
+    r_t = bias_O + (O * (bias_H2 + pycnn.tanh(H2 * (bias_H + pycnn.tanh(H * final_state)))))
     return pycnn.pickneglogsoftmax(r_t, label)
 
 
-def predict(word_indices, model, builder):
+def predict(word_indices, model, builder, target):
     """
     predict demographic label
     :param word_indices:
@@ -261,24 +320,45 @@ def predict(word_indices, model, builder):
     :return: tag and label predictions
     """
     forward_states = build_tagging_graph(word_indices, model, builder)
-
-    H = pycnn.parameter(pH)
-    O = pycnn.parameter(pO)
-    bias_O = pycnn.parameter(biasO)
-    bias_H = pycnn.parameter(biasH)
-
     final_state = forward_states[-1]
 
-    # TODO: add bias terms
-    r_t = bias_O + (O * (bias_H + pycnn.tanh(H * final_state)))
+    H = pycnn.parameter(pH)
+    bias_H = pycnn.parameter(biasH)
+    H2 = pycnn.parameter(pH2)
+    bias_H2 = pycnn.parameter(biasH2)
 
-    out = pycnn.softmax(r_t)
-    chosen = np.argmax(out.npvalue())
+    if target in ['age', 'both', 'joint']:
+        O = pycnn.parameter(pOutAge)
+        bias_O = pycnn.parameter(biasOutAge)
+    elif target == 'gender':
+        O = pycnn.parameter(pOutGender)
+        bias_O = pycnn.parameter(biasOutGender)
 
-    return chosen
+    if target == 'both':
+        O2 = pycnn.parameter(pOutGender)
+        bias_O2 = pycnn.parameter(biasOutGender)
 
 
-def evaluate(data_set, model, builder):
+    if target == 'both':
+        hidden = bias_H2 + pycnn.tanh(H2 * (bias_H + pycnn.tanh(H * final_state)))
+        r_age = bias_O + (O * hidden)
+        r_gender = bias_O2 + (O2 * hidden)
+
+        out_age = pycnn.softmax(r_age)
+        out_gender = pycnn.softmax(r_gender)
+
+        return [np.argmax(out_age.npvalue()), np.argmax(out_gender.npvalue())]
+
+    else:
+        r_t = bias_O + (O * (bias_H2 + pycnn.tanh(H2 * (bias_H + pycnn.tanh(H * final_state)))))
+
+        out = pycnn.softmax(r_t)
+        chosen = np.argmax(out.npvalue())
+
+        return chosen
+
+
+def evaluate(data_set, model, builder, target):
     """
     evaluate a test file
     :param data_set: the converted input file, i.e., a list of ([word_indices], label_index)
@@ -289,42 +369,68 @@ def evaluate(data_set, model, builder):
     good = 0.0
     bad = 0.0
 
+    individual_good = [0.0, 0.0]
+    individual_bad = [0.0, 0.0]
+
     for test_sentence, test_label in data_set:
-        predicted_label = predict(test_sentence, model, builder)
+        predicted_label = predict(test_sentence, model, builder, target)
 
         if predicted_label == test_label:
             good += 1
         else:
             bad += 1
 
-    return good / (good + bad)
+        if target == 'both':
+            label_dict = {0: i2al, 1: i2gl}
+            for i, (prediction, gold) in enumerate(zip(predicted_label, test_label)):
+                if prediction == gold:
+                    individual_good[i] += 1
+                else:
+                    # print('\tMISTAKE:', label_dict[i][prediction], label_dict[i][gold], file=sys.stderr)
+                    individual_bad[i] += 1
+
+    if target == 'both':
+        return "%.4f instance accuracy, label accuracy %.4f age, %.4f gender" % (
+            good / (good + bad), individual_good[0] / (individual_good[0] + individual_bad[0]),
+            individual_good[1] / (individual_good[1] + individual_bad[1]))
+    else:
+        return '%.4f' % (good / (good + bad))
 
 
 num_instances = 1
 losses = []
 start = time.time()
 
+current_best_dev = 0.0
+current_best_test = 0.0
+best_model = 0
+
 for iteration in range(args.iterations):
+
+    # re-sample both target types and add their
+    if args.target == 'both':
+        train = random.sample(train_age, smaller_training_size)
+        train.extend(random.sample(train_gender, smaller_training_size))
+
     random.shuffle(train)
     batch_i = 0
 
-    for i, (sentence, label) in enumerate(train, 1):
+    for i, ((sentence, label), instance_target) in enumerate(train, 1):
 
         if num_instances % args.status == 0:
             print('ITERATION %s, instance %s/%s' % (iteration + 1, i, len(train)), file=sys.stderr, end='\t')
-            # sgd.status()
             print('Avg. loss', sum(losses) / len(losses), file=sys.stderr, end='\t')
             print('time: %.2f sec' % (time.time() - start), file=sys.stderr)
+            # sgd.status()
             start = time.time()
             losses.clear()
 
         if num_instances % (args.status * 5) == 0:
             print('-' * 50, file=sys.stderr)
-            print("Accuracy on dev: %s\n" % (evaluate(dev, model, builder)), file=sys.stderr)
+            print("Accuracy on dev: %s\n" % (evaluate(dev, model, builder, args.target)), file=sys.stderr)
 
         # TRAINING
-        # fit the shit!
-        error = fit(sentence, label, model, builder)
+        error = fit(sentence, label, model, builder, instance_target)
 
         losses.append(error.scalar_value())
         error.backward()
@@ -337,10 +443,17 @@ for iteration in range(args.iterations):
             sgd.update()
 
     print('=' * 50, file=sys.stderr)
-    print("iteration %s. Accuracy on dev: %s" % (iteration + 1, evaluate(dev, model, builder)))
-    print("iteration %s. Accuracy on test: %s" % (iteration + 1, evaluate(test, model, builder)))
-    print('iteration %s. Avg. loss %s' %(iteration + 1, sum(losses) / len(losses)))
+    dev_accuracy = evaluate(dev, model, builder, args.target)
+    test_accuracy = evaluate(test, model, builder, args.target)
+    if float(dev_accuracy.split()[0]) > current_best_dev:
+        current_best_dev = float(dev_accuracy.split()[0])
+        current_best_test = float(test_accuracy.split()[0])
+        best_model = iteration + 1
+    print("iteration %s. Accuracy on dev: %s (best: %s @ %s)" % (iteration + 1, dev_accuracy, current_best_dev, best_model))
+    print("iteration %s. Accuracy on test: %s (best: %s @ %s)" % (iteration + 1, test_accuracy, current_best_test, best_model))
+    print('iteration %s. Avg. loss %s' % (iteration + 1, sum(losses) / len(losses)))
     print('=' * 50, file=sys.stderr)
+    print('', file=sys.stderr)
     num_instances = 1
     start = time.time()
     losses.clear()
