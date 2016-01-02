@@ -225,6 +225,9 @@ word_embeddings = model.add_lookup_parameters("word_lookup", (num_words, WORD_EM
 if args.embeddings:
     word_embeddings.init_from_array(np.array(pre_trained_embeddings))
 
+convLayer = model.add_parameters("CONVOLUTION", (WORD_EMBEDDING_SIZE, MLP_HIDDEN_LAYER_SIZE))
+
+
 pH = model.add_parameters("HID", (MLP_HIDDEN_LAYER_SIZE, LSTM_HIDDEN_LAYER_SIZE))
 biasH = model.add_parameters("BIAS_HIDDEN", (MLP_HIDDEN_LAYER_SIZE))
 
@@ -239,15 +242,16 @@ if args.target in ['gender', 'both']:
     pOutGender = model.add_parameters("OUT2", (len(gender_labels), MLP_HIDDEN_LAYER_SIZE))
     biasOutGender = model.add_parameters("BIAS_OUT2", (len(gender_labels)))
 
-# TODO: do we need a second hidden layer, or do we want to pool information there?
-pH2 = model.add_parameters("HID2", (MLP_HIDDEN_LAYER_SIZE, MLP_HIDDEN_LAYER_SIZE))
-biasH2 = model.add_parameters("BIAS_HIDDEN2", (MLP_HIDDEN_LAYER_SIZE))
 
 print("declared variables", file=sys.stderr)
 
-builder = pycnn.LSTMBuilder(1, WORD_EMBEDDING_SIZE, LSTM_HIDDEN_LAYER_SIZE, model)
-# builder = pycnn.SimpleRNNBuilder(1, WORD_EMBEDDING_SIZE, LSTM_HIDDEN_LAYER_SIZE, model)
-print("declared builder", file=sys.stderr)
+pycnn.renew_cg()
+new_word_embeddings = [pycnn.lookup(model["word_lookup"], w) for w in train[0][0][0]]
+print(new_word_embeddings)
+
+pycnn.conv1d_narrow(new_word_embeddings, pycnn.cg())
+
+sys.exit()
 
 
 def build_tagging_graph(word_indices, model, builder):
@@ -308,7 +312,7 @@ def fit(word_indices, label, model, builder, target):
     #     return pycnn.esum([pycnn.pickneglogsoftmax(r_age, label[0]), pycnn.pickneglogsoftmax(r_gender, label[1])])
 
     # r_t = bias_O + (O * (bias_H2 + pycnn.tanh(H2 * (bias_H + pycnn.tanh(H * final_state)))))
-    r_t = bias_O + (O * (bias_H + pycnn.rectify(H * final_state)))
+    r_t = bias_O + (O * (bias_H + (H * final_state)))
     # return pycnn.pick(r_t, label)
     return pycnn.pickneglogsoftmax(r_t, label)
 
@@ -343,7 +347,7 @@ def predict(word_indices, model, builder, target):
 
     if target == 'both':
         # hidden = bias_H2 + pycnn.tanh(H2 * (bias_H + pycnn.tanh(H * final_state)))
-        hidden = bias_H + pycnn.rectify(H * final_state)
+        hidden = bias_H + pycnn.tanh(H * final_state)
         r_age = bias_O + (O * hidden)
         r_gender = bias_O2 + (O2 * hidden)
 
@@ -354,7 +358,7 @@ def predict(word_indices, model, builder, target):
 
     else:
         # r_t = bias_O + (O * (bias_H2 + pycnn.tanh(H2 * (bias_H + pycnn.tanh(H * final_state)))))
-        r_t = bias_O + (O * (bias_H + pycnn.rectify(H * final_state)))
+        r_t = bias_O + (O * (bias_H + (H * final_state)))
 
         out = pycnn.softmax(r_t)
         chosen = np.argmax(out.npvalue())
