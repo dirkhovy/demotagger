@@ -1,13 +1,12 @@
 import argparse
-from collections import deque
-
+import sys
 import tensorflow as tf
-from tensorflow.python.ops import rnn
-
 import numpy as np
-
+from tensorflow.python.ops import rnn
+from collections import deque
 from models_tf import RnnCategorial, CnnCategorial
 from reader import read_datasets, make_dense
+
 
 parser = argparse.ArgumentParser(
     description="train a demographics predictor. File formats: CoNLL, plus one line with CSV demographic values")
@@ -35,6 +34,7 @@ args = parser.parse_args()
 datasets = read_datasets(args.train, args.test, args.dev, args.target)
 train_dataset = datasets['train']
 dev_dataset = datasets['dev']
+test_dataset = datasets['test']
 word_mapper = datasets['word_mapper']
 label_mapper = datasets['label_mapper']
 
@@ -48,6 +48,10 @@ train_sent_lens = np.array([len(sent) for sent in train_dataset['sentences']])
 X_dev, y_dev = make_dense(dev_dataset['sentences'], args.max_len,
                           dev_dataset['labels'], len(label_mapper))
 dev_sent_lens = np.array([len(sent) for sent in dev_dataset['sentences']])
+X_test, y_test= make_dense(test_dataset['sentences'], args.max_len,
+                          test_dataset['labels'], len(label_mapper))
+test_sent_lens = np.array([len(sent) for sent in test_dataset['sentences']])
+
 
 assert len(X_train) == len(y_train)
 assert len(X_train) == len(train_sent_lens)
@@ -86,6 +90,7 @@ with tf.Session() as sess:
     # num_total = deque(50)
 
     for epoch in range(1, args.num_epochs + 1):
+        print("ITERATION {}".format(epoch), file=sys.stderr)
         np.random.shuffle(indices)
 
         # Train loop
@@ -105,7 +110,7 @@ with tf.Session() as sess:
             losses.append(loss_batch)
             if i % 500 == 0:
                 moving_avg = sum(num_correct_list) / (len(num_correct_list) * args.batch_size)
-                print("Batch ({}). Loss {} / Accuracy {}".format(stat_size, sum(losses), moving_avg))
+                print("Epoch {}, instance {} (Batch size {}). Loss {} / Cumulative training accuracy {}".format(epoch, i, args.batch_size, sum(losses), moving_avg), file=sys.stderr)
 
         # Validation set performance
         dev_feed = {model.y_indicator: y_dev,
@@ -114,6 +119,15 @@ with tf.Session() as sess:
                     model.input: X_dev,
                     model.dropout_keep_p: 1}
 
-        preds, num_correct_dev = sess.run([model.preds, model.num_correct], dev_feed)
-        print("Development set performance: {}".format(num_correct_dev / len(X_dev)))
+        # Test set performance
+        test_feed = {model.y_indicator: y_test,
+                    model.y: test_dataset['labels'],
+                    model.input_lengths: test_sent_lens,
+                    model.input: X_test,
+                    model.dropout_keep_p: 1}
+
+        preds_dev, num_correct_dev = sess.run([model.preds, model.num_correct], dev_feed)
+        preds_test, num_correct_test = sess.run([model.preds, model.num_correct], test_feed)
+        print("Epoch {}: Development set performance: {}".format(epoch, num_correct_dev / len(X_dev)))
+        print("Epoch {}: Test set performance: {}".format(epoch, num_correct_test / len(X_test)))
 
