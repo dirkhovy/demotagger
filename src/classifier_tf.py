@@ -2,6 +2,7 @@ import argparse
 import sys
 import tensorflow as tf
 import numpy as np
+import multiprocessing
 from tensorflow.python.ops import rnn
 from collections import deque
 from models_tf import RnnCategorial, CnnCategorial
@@ -68,7 +69,9 @@ else:
                           max_seq_len=args.max_len)
 
 
-with tf.Session() as sess:
+NUM_THREADS = min(10, multiprocessing.cpu_count())
+with tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=NUM_THREADS)) as sess:
+# with tf.Session() as sess:
     # Try ADAM out for training
     global_step = tf.Variable(0, name="global_step", trainable=False)
 
