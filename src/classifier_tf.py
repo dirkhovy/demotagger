@@ -70,7 +70,7 @@ else:
 
 
 NUM_THREADS = min(10, multiprocessing.cpu_count())
-with tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=NUM_THREADS)) as sess:
+with tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=NUM_THREADS, inter_op_parallelism_threads=NUM_THREADS)) as sess:
 # with tf.Session() as sess:
     # Try ADAM out for training
     global_step = tf.Variable(0, name="global_step", trainable=False)
