@@ -87,6 +87,20 @@ with tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=NUM_THREADS))
     last_index = len(indices) - (len(indices) % args.batch_size)
     indices = indices[:last_index]
 
+    # Validation set performance
+    dev_feed = {model.y_indicator: y_dev,
+                model.y: dev_dataset['labels'],
+                model.input_lengths: dev_sent_lens,
+                model.input: X_dev,
+                model.dropout_keep_p: 1}
+
+    # Test set performance
+    test_feed = {model.y_indicator: y_test,
+                model.y: test_dataset['labels'],
+                model.input_lengths: test_sent_lens,
+                model.input: X_test,
+                model.dropout_keep_p: 1}
+
     stat_size = 50
     num_correct_list = deque(maxlen=stat_size)
     losses = deque(maxlen=stat_size)
@@ -115,22 +129,9 @@ with tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=NUM_THREADS))
                 moving_avg = sum(num_correct_list) / (len(num_correct_list) * args.batch_size)
                 print("Epoch {}, instance {} (Batch size {}). Loss {} / Cumulative training accuracy {}".format(epoch, i, args.batch_size, sum(losses), moving_avg), file=sys.stderr)
 
-        # Validation set performance
-        dev_feed = {model.y_indicator: y_dev,
-                    model.y: dev_dataset['labels'],
-                    model.input_lengths: dev_sent_lens,
-                    model.input: X_dev,
-                    model.dropout_keep_p: 1}
-
-        # Test set performance
-        test_feed = {model.y_indicator: y_test,
-                    model.y: test_dataset['labels'],
-                    model.input_lengths: test_sent_lens,
-                    model.input: X_test,
-                    model.dropout_keep_p: 1}
 
         preds_dev, num_correct_dev = sess.run([model.preds, model.num_correct], dev_feed)
         preds_test, num_correct_test = sess.run([model.preds, model.num_correct], test_feed)
-        print("Epoch {}: Development set performance: {}".format(epoch, num_correct_dev / len(X_dev)))
-        print("Epoch {}: Test set performance: {}".format(epoch, num_correct_test / len(X_test)))
+        print("Epoch {}: Development set performance: {}".format(epoch, num_correct_dev / len(X_dev)), file=sys.stdout, flush=True)
+        print("Epoch {}: Test set performance: {}".format(epoch, num_correct_test / len(X_test)), file=sys.stdout, flush=True)
 
